@@ -1,0 +1,394 @@
+---
+title: "CIND820 Physical Health and Mental Health"
+author: "Erica Tsui 501073613"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Install packages for pre-processing and classification models.
+
+```{r}
+install.packages("tidyverse")
+install.packages("haven")
+install.packages("e1071")
+install.packages("rpart")
+install.packages("rpart.plot")
+install.packages("rattle")
+install.packages("caret")
+install.packages("corrplot")
+library(tidyverse)
+library(haven)
+library(rpart)
+library(rpart.plot)
+library(rattle)
+library(e1071)
+library(caret)
+library(corrplot)
+```
+
+Import the BRFSS (Behavioral Risk Factor Surveillance System) 2019 dataset. The original file was in a SAS .xpt format but will be saved as a .csv after processing.
+The file is in a zip file located at https://www.cdc.gov/brfss/annual_data/2019/files/LLCP2019XPT.zip
+
+```{r}
+LLCP_2019 <- read_xpt(file = "LLCP2019.xpt")
+```
+
+Extract the desired variables and rename them with more intuitive labels and to make them more readable by R.
+
+```{r}
+BRFSS_raw <- LLCP_2019 %>%
+  select(
+    MENTHLTH, `_AGE80`, `_RACE`, `_SEX`, `_BMI5`, `CHILDREN`,
+    `_EDUCAG`, `INCOME2`, TRNSGNDR, SOMALE, SOFEMALE, MARITAL,
+    EMPLOY1, GENHLTH, PHYSHLTH, `_SMOKER3`, `_DRNKWK1`, `_FRUTSU1`, `_VEGESU1`,
+    `_PA150R3`, `_RFHYPE5`, `_RFCHOL2`, `_ASTHMS1`, `_DRDXAR2`
+    ) %>%
+  rename(
+    mental_health = MENTHLTH,
+    age = `_AGE80`,
+    race = `_RACE`,
+    sex = `_SEX`,
+    bmi = `_BMI5`,
+    children = `CHILDREN`,
+    education = `_EDUCAG`,
+    income = `INCOME2`,
+    transgender = TRNSGNDR,
+    sexorient_male = SOMALE,
+    sexorient_fem = SOFEMALE,
+    marital = MARITAL,
+    employment = EMPLOY1,
+    gen_health = `GENHLTH`,
+    bad_health_days = `PHYSHLTH`, 
+    smoker = `_SMOKER3`,
+    drinks_week = `_DRNKWK1`,
+    fruit_day = `_FRUTSU1`,
+    vegetable_day = `_VEGESU1`,
+    exercise_150 = `_PA150R3`,
+    blood_pres = `_RFHYPE5`,
+    cholesterol = `_RFCHOL2`,
+    asthma = `_ASTHMS1`,
+    arthritis = `_DRDXAR2`
+  )
+```
+
+For each variable the responses were tallied to identify NA, "refused" or "don't know" responses. The "don't know/refused" responses were coded 7/77 or 9/99/99900 depending on the variable. Any rows having these three response types were removed before further data exploration. There was some inconsistency with how valid zero responses were recorded. Variables that coded 0 as '88' were corrected to avoid R treating the response as a numerical 88. 
+
+```{r}
+summary(BRFSS_raw)
+
+#Repeat below for every variable
+c <- count(BRFSS_raw, mental_health)
+view(c)
+```
+
+Every variable was cleaned for the three responses mentioned above. Most of the original variables were coded numerically instead of the named categories and when the dataset was imported all the classes were defaulted to numerical. Variables had their numerical codes replaced with the actual names and set to the correct ordinal or nominal classes if appropriate. Outliers were defined as being more than 3 standard deviations away from the mean (after cleaning and adjusting '88' responses) and removed. Most outliers only fell on the right boundary since the left would have been in the negatives and impossible (ex. negative fruit consumption). Some variable categories were combined. The transgender and sexual orientation variables were removed completely due to the high number of NA results.
+
+```{r}
+#Change mental health days from numerical to Yes/No
+BRFSS1 <- BRFSS_raw %>%
+  filter(!(is.na(mental_health) | mental_health %in% c(77,99))) %>%
+  mutate(mental_health = factor(ifelse(mental_health == 88, "No", "Yes"), 
+                                ordered = FALSE))
+
+#Change race values to unordered names
+#Combine Hawaiians (5) into Other (6)
+BRFSS1 <- BRFSS1 %>%
+  filter(!(is.na(race) | race == 9)) %>%
+  mutate(race = factor(case_when(race == 1 ~ "White",
+                                 race == 2 ~ "Black",
+                                 race == 3 ~ "Indigenous",
+                                 race == 4 ~ "Asian",
+                                 race %in% c(5, 6) ~ "Other",
+                                 race == 7 ~ "Multiracial",
+                                 race == 8 ~ "Hispanic"),
+                       ordered = FALSE))
+
+#Re-label sex to male and female
+BRFSS1 <- BRFSS1 %>%
+  mutate(sex = factor(ifelse(sex == 1, "Male", "Female"), ordered = FALSE))
+
+#Calculating BMI outliers then removing
+bmi_sd <- sd(BRFSS1$bmi, na.rm = TRUE)
+bmi_mean <- mean(BRFSS1$bmi, na.rm = TRUE)
+bmi_out_lower <- bmi_mean - (3 * bmi_sd)
+bmi_out_upper <- bmi_mean + (3 * bmi_sd)
+
+BRFSS1 <- BRFSS1 %>%
+  filter(!(is.na(bmi)) & (bmi > bmi_out_lower) & (bmi < bmi_out_upper))
+
+#Re-label children entry '88' to 0 children
+BRFSS1 <- BRFSS1 %>%
+  filter(!(is.na(children) | children == 99)) %>%
+  mutate(children = replace(children, children == 88, 0))
+
+#Calculating outliers, rounded up for whole children
+child_sd <- sd(BRFSS1$children)
+child_mean <- mean(BRFSS1$children)
+child_out_upper <- round(child_mean + (3 * child_sd)) 
+
+#Removing right side children outliers, no left needed since no negative kids
+BRFSS1 <- BRFSS1[BRFSS1$children <= child_out_upper,]
+
+#Set education to ordinal levels and names
+BRFSS1 <- BRFSS1 %>%
+  filter(!(is.na(education) | education == 9)) %>%
+  mutate(education = factor(case_when(education == 1 ~ "Some High School",
+                                      education == 2 ~ "High School",
+                                      education == 3 ~ "Some Post Secondary",
+                                      education == 4 ~ "Post Secondary"),
+                            levels = c("Some High School", "High School",
+                                       "Some Post Secondary", "Post Secondary"),
+                            ordered = TRUE))
+
+#Set income to ordinal level bins
+BRFSS1 <- BRFSS1 %>%
+  filter(!(is.na(income) | income %in% c(77,99))) %>%
+  mutate(income = factor(case_when(income == 1 ~ "<10",
+                                   income == 2 ~ "10-15",
+                                   income == 3 ~ "15-20",
+                                   income == 4 ~ "20-25",
+                                   income == 5 ~ "25-35",
+                                   income == 6 ~ "35-50",
+                                   income == 7 ~ "50-75",
+                                   income == 8 ~ ">75"), 
+                         levels = c("< 10", "10-15", "15-20", "20-25",
+                                    "25-35", "35-50", "50-75", ">75"),
+                         ordered = TRUE))
+
+#Remove transgender variable due to high NAs
+sum(is.na(BRFSS1$transgender))
+BRFSS1$transgender <- NULL
+
+#Combine sex orientation of males and females into a new column
+BRFSS1 <- BRFSS1 %>%
+  mutate(orientation = coalesce(sexorient_male, sexorient_fem))
+#Checking how many NA values exist after combining genders into one column
+sum(is.na(BRFSS1$orientation))
+BRFSS1$sexorient_male <- NULL
+BRFSS1$sexorient_fem <- NULL
+BRFSS1$orientation <- NULL
+
+#Re-label marital status to nominal titles
+BRFSS1 <- BRFSS1 %>%
+  filter(!(is.na(marital) | marital == 9)) %>%
+  mutate(marital = factor(case_when(marital == 1 ~ "Married",
+                                    marital == 2 ~ "Divorced",
+                                    marital == 3 ~ "Widowed",
+                                    marital == 4 ~ "Separated",
+                                    marital == 5 ~ "Never Married",
+                                    marital == 6 ~ "Unmarried Couple"),
+                          ordered = FALSE))
+
+#Re-label employment, merge "Employed for wages" with "Self-employed"
+#Merge all unemployment categories into single "Unemployed"
+BRFSS1 <- BRFSS1 %>%
+  filter(!(is.na(employment) | employment == 9)) %>%
+  mutate(employment = factor(case_when(employment %in% c(1, 2) ~ "Employed",
+                                       employment %in% c(3:6) ~ "Unemployed",
+                                       employment == 7 ~ "Retired",
+                                       employment == 8 ~ "Unable to Work"),
+                             ordered = FALSE))
+
+#Re-label general health status and set ordinal levels
+BRFSS1 <- BRFSS1 %>%
+  filter(!(is.na(gen_health) | gen_health %in% c(7,9))) %>%
+  mutate(gen_health = factor(case_when(gen_health == 1 ~ "Excellent",
+                                       gen_health == 2 ~ "Very Good",
+                                       gen_health == 3 ~ "Good",
+                                       gen_health == 4 ~ "Fair",
+                                       gen_health == 5 ~ "Poor"), 
+                             levels = c("Poor", "Fair", "Good", "Very Good",
+                                        "Excellent"),
+                             ordered = TRUE))
+
+#Set bad_health_days response '88' to 0 days
+BRFSS1 <- BRFSS1 %>%
+  filter(!(is.na(bad_health_days) | bad_health_days %in% c(77,99))) %>%
+  mutate(bad_health_days = replace(bad_health_days, bad_health_days == 88, 0))
+
+#Re-label smoking status
+BRFSS1 <- BRFSS1 %>%
+  filter(!(is.na(smoker) | smoker == 9)) %>%
+  mutate(smoker = factor(case_when(smoker %in% c(1, 2) ~ "Current Smoker",
+                                   smoker == 3 ~ "Former Smoker",
+                                   smoker == 4 ~ "Never Smoked"),
+                         ordered = FALSE))
+
+#Remove drinks per week outliers (calculated after removing '99900' responses)
+BRFSS1 <- BRFSS1[BRFSS1$drinks_week != 99900,]
+
+drink_sd <- sd(BRFSS1$drinks_week)
+drink_mean <- mean(BRFSS1$drinks_week)
+drink_out_upper <- drink_mean + (3 * drink_sd) #No lower bound needed
+BRFSS1 <- BRFSS1[BRFSS1$drinks_week <= drink_out_upper,]
+
+#Remove fruits per day and vegetables per day outliers
+fruit_sd <- sd(BRFSS1$fruit_day, na.rm = TRUE)
+fruit_mean <- mean(BRFSS1$fruit_day, na.rm = TRUE)
+fruit_out_upper <- fruit_mean + (3 * fruit_sd) #No lower bound needed
+
+veg_sd <- sd(BRFSS1$vegetable_day, na.rm = TRUE)
+veg_mean <- mean(BRFSS1$vegetable_day, na.rm = TRUE)
+veg_out_upper <- veg_mean + (3 * veg_sd) #No lower bound needed
+
+BRFSS1 <- BRFSS1 %>%
+  filter(!(is.na(fruit_day) | fruit_day > fruit_out_upper)) %>%
+  filter(!(is.na(vegetable_day) | vegetable_day > veg_out_upper))
+
+#Re-label exercise time ranges and set ordinal factor levels
+BRFSS1 <- BRFSS1 %>%
+  filter(!(is.na(exercise_150) | exercise_150 == 9)) %>%
+  mutate(exercise_150 = factor(case_when(exercise_150 == 1 ~ ">150",
+                                         exercise_150 == 2 ~ "1-149",
+                                         exercise_150 == 3 ~ "0",), 
+                               levels = c("0", "1-149", ">150"),
+                               ordered = TRUE))
+
+#Re-label high blood pressure to Yes and No
+BRFSS1 <- BRFSS1 %>%
+  filter(!(is.na(blood_pres) | blood_pres == 9)) %>%
+  mutate(blood_pres = factor(ifelse(blood_pres == 1, "No", "Yes"), 
+                             ordered = FALSE))
+
+#Re-label high cholesterol to Yes and No
+BRFSS1 <- BRFSS1 %>%
+  filter(!(is.na(cholesterol) | cholesterol == 9)) %>%
+  mutate(cholesterol = factor(ifelse(cholesterol == 1, "No", "Yes"), 
+                              ordered = FALSE))
+
+#Re-label asthma status
+BRFSS1 <- BRFSS1 %>%
+  filter(!(is.na(asthma) | asthma == 9)) %>%
+  mutate(asthma = factor(case_when(asthma == 1 ~ "Current",
+                                   asthma == 2 ~ "Former",
+                                   asthma == 3 ~ "Never"), 
+                         ordered = FALSE))
+
+#Re-label arthritis to Yes and No
+BRFSS1 <- BRFSS1 %>%
+  filter(!(is.na(arthritis))) %>%
+  mutate(arthritis = factor(ifelse(arthritis == 1, "Yes", "No"), 
+                            ordered = FALSE))
+
+write.csv(BRFSS1, "BRFSS1.csv")
+```
+
+There are some highlights looking at the distribution of the individual variables. Age was skewed left more than expected since the range of ages recorded was 18 to 80 putting the theoretical mean at 31. This could have been caused by the method that responses were gathered. Since all interviews were conducted over the phone (landline and cellphone) younger people may have screened the unknown number and not picked up. The disproportionate age may make the model less effective for younger people.
+
+Race and BMI supported the dataset reflecting the US population. The large number of White respondents was close to the US Census reported 76%. The CDC says a normal BMI is 18 - 25 which was close to the peak of the BMI distribution.
+
+Most respondents rated their general physical health as good or very good but not the highest rating of excellent. Since it was a self-rating there was the possibility that a mentally unwell person may perceive their physical health differently than a mentally healthy person. A related numerical variable was the number of bad physical health days in the last 30 days. More than half of the respondents said they experienced 0 bad days. Interestingly, the distribution of those who experienced some bad days dipped in the middle. It seemed people either experienced very short term problems or had chronic conditions but few reported moderate length problems. 
+
+```{r}
+barchart(BRFSS1$mental_health, main = "Bad mental health in last 30 Days")
+hist(BRFSS1$age, main = 'Age', xlab = 'Age')
+barchart(BRFSS1$race, main = "Race")
+barchart(BRFSS1$sex, main = "sex")
+hist(BRFSS1$bmi, main = "Body Mass Index", xlab = "BMI (2 implied decimals)")
+hist(BRFSS1$children, main = "Children in Household", 
+     xlab="children in household")
+barchart(BRFSS1$education, main = "Highest Education Attained")
+barchart(BRFSS1$income, main = "Income (in $1000s)")
+barchart(BRFSS1$marital, main = "Marital Status")
+barchart(BRFSS1$employment, main = "Employment")
+barchart(BRFSS1$gen_health, main = "Self-rating of General Health")
+hist(BRFSS1$bad_health_days, main = "Bad physical health days (in last 30)",
+     xlab = "Bad physical health days")
+barchart(BRFSS1$smoker, main = "Smoker Status")
+hist(BRFSS1$drinks_week, main = "Drinks per Week", xlab = "Drinks per week")
+hist(BRFSS1$fruit_day, main = "Fruit Consumed", 
+     xlab = "Fruit consumed (implied 2 decimals)")
+hist(BRFSS1$vegetable_day, main = "Vegetables Consumed", 
+     xlab = "Vegetables consumed (implied 2 decimals)")
+```
+
+The below correlation matrix and visualization shows the correlation for most the independent variables were not very high. The two exceptions being:
+
+1) The moderate negative correlation between the respondent's age and children in the household. As age increased the number of children in the household decreased. A possible explanation was as respondent's aged their children moved out.
+    
+2) The weak positive correlation between fruit and vegetables consumed. This made sense as a healthy diet usually incorporates both fruits and vegetables. The original expectation was that the correlation would be even stronger. Similarly, it was expected that drinks per week would have a moderate negative correlation with fruits and vegetables but the matrix showed little relationship.
+
+Unfortunately some categorical variables did not have numerical data and could not be included in the correlation matrix. The income variable in particular would have been good to include but only had range responses instead of numerical.
+
+```{r}
+BRFSS_num <- BRFSS1 %>%
+  select(age, bmi, children, bad_health_days, drinks_week, fruit_day, 
+         vegetable_day)
+
+BRFSS_num_corr <- cor(BRFSS_num)
+corrplot(BRFSS_num_corr, method = "circle")
+BRFSS_num_corr
+```
+
+The three classification models used are:
+1) Decision Tree
+2) Naive Bayes
+3) Logistic Regression
+
+To prepare, the dataset was split into a train and test group. The ratio was 70:30 train to test. 
+##No k-fold has been used to start because the dataset is large.
+
+```{r}
+test_index <- sample(1:nrow(BRFSS1), nrow(BRFSS1) * 0.3)
+train_set <- BRFSS1[-test_index, ]
+test_set <- BRFSS1[test_index, ]
+```
+
+
+Decision Tree Classifier
+For the first run the function was left completely default with all the variables. The resulting tree only split twice and the terminal nodes had a high impurity. 
+#Try changing formula settings to grow tree
+
+```{r}
+train_tree1 <- rpart(mental_health ~ ., data = train_set, method = "class")
+summary(train_tree1)
+fancyRpartPlot(train_tree1)
+```
+
+Predictions using the first tree model were not great. Specificity was inflated because the model was rejecting more cases as no risk. The biggest issue was the low recall even though precision was also low (confirmed by the low F1 score). Combined with the low sensitivity, this model was missing at risk people. Choosing between Type I versus Type II errors, it was preferred to have a higher false positive in this context since people at risk would follow up and look for help they don't need versus the worse Type II error of people needing help but the model not identifying the risk.
+
+```{r}
+test_tree_pred <- predict(train_tree1, newdata = test_set, type = "class")
+tree1_table <- table(predicted = factor(test_tree_pred, levels = c("Yes", "No")), 
+                      actual = factor(test_set$mental_health, levels = c("Yes", "No")))
+tree1_cm <- confusionMatrix(tree1_table, positive = "Yes")
+tree1_cm
+tree1_cm$byClass
+```
+
+Naive Bayes
+The Naive Bayes model performed slightly better than the default decision tree for the important measures. Even though accuracy is slightly lower recall and sensitivity are higher. As discussed previously, in this context a low false negative is preferred even if the trade-off is more false positives. Improving the model with more records is not possible with the existing dataset. 
+
+```{r}
+train_NB <- naiveBayes(mental_health ~ ., data = BRFSS1)
+test_NB_pred <- predict(train_NB, newdata = test_set, type = "class")
+result_NB <- table(predicted = factor(test_NB_pred, levels = c("Yes", "No")), 
+                      actual = factor(test_set$mental_health, levels = c("Yes", "No")))
+NB_cm <- confusionMatrix(result_NB, positive = "Yes")
+NB_cm
+NB_cm$byClass
+```
+
+Logistic Regression
+The first run trained the model with all the variables. 
+
+```{r}
+train_log <- glm(mental_health ~ ., data = BRFSS1, family = "binomial")
+summary(train_log)
+```
+
+Comparing first runs, the logistic regression model did the worst for the desired measures. Accuracy was the highest but recall and sensitivity was low. Precision and specificity were also high which just emphasized the problem of the model incorrectly classifying at risk people as safe. 
+#Try forward and backwards feature selection. Regsubsets.
+#Don't think PCA will matter very much because correlation was low for most of the independent variables
+```{r}
+test_log_pred <- predict(train_log, newdata = test_set, type = "response")
+test_log_class <- ifelse(test_log_pred >= 0.5, "Yes", "No")
+result_log <- table(predicted = factor(test_log_class, levels = c("Yes", "No")), 
+                      actual = factor(test_set$mental_health, levels = c("Yes", "No")))
+log_cm <- confusionMatrix(result_log, positive = "Yes")
+log_cm
+log_cm$byClass
+```
