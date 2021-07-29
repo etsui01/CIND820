@@ -372,7 +372,6 @@ Decision Tree Classifier - Balanced Training Set
 This tree split more and added to the features being used. It still used bad health days and age but chose different points and added marital status and sex.
 ```{r}
 train_tree_bal <- rpart(mental_health ~ ., data = train_set_bal, method = "class")
-summary(train_tree_bal)
 fancyRpartPlot(train_tree_bal)
 
 test_tree_pred <- predict(train_tree_bal, newdata = test_set, type = "class")
@@ -385,11 +384,13 @@ tree_cm_bal
 tree_cm_bal$byClass[7]
 ```
 Decision Tree - Balanced Training Set and k-fold
-
+Multiple folds increased performance but restricted the tree. Even though it has the same number of splits with the same variables as the first tree the point of splitting is different. 
 ```{r}
 train_tree_kf <- train(mental_health ~., data = train_set_bal, 
                        trControl = k_fold_train,
-                     method = "rpart")
+                       method = "rpart")
+fancyRpartPlot(train_tree_kf$finalModel)
+
 test_tree_kf_pred <- predict(train_tree_kf, newdata = test_set)
 tree_table_kf <- table(predicted = factor(test_tree_kf_pred, levels = c("Yes", "No")), 
                    actual = factor(test_set$mental_health, levels = c("Yes", "No")))
@@ -399,7 +400,7 @@ tree_cm_kf$byClass[7]
 ```
 
 Comparing the Decision Trees <br/>
-The Decision Tree generated with the balanced dataset and k-fold validation performed best. Despite the small increase in balanced accuracy, there was a substantial increase in recall with a small decrease in precision. This desirable trade-off lead to an increase in the F1-score. Detection rate increased as the balanced dataset model was better at identifying true positives.
+The Decision Tree generated with the balanced dataset and k-fold validation performed best. Despite the small increase in balanced accuracy, there was a large increase in recall relative to the small decrease in precision. This desirable trade-off lead to an increase in the F1-score. Detection rate increased as the balanced dataset model was better at identifying true positives. Comparing the trees the second tree is the largest yet does not predict new data as well as the final tree. The final k-fold tree shrunk back to the same two variables as the initial tree but the point that each node was split was different. The decision tree seems to make generalized decisions using only bad health and age.
 ```{r}
 kable(data.frame(Models = c("Default", "Balanced", "Balanced & k-fold"),
                  'F1-score' = round(c(tree_cm_default$byClass[7], 
@@ -437,7 +438,7 @@ forest_cm_default$byClass[7]
 Random Forest - Balanced Training Set <br/>
 To try and improve the model, the balanced training set was used. Unlike the other improved models k-fold was not implemented due to computational restraints. The randomForest function requires the predictor variables to class match. Since the ordering was removed for ROSE it has to be removed for this test set to run.
 ```{r}
-rf_model_bal <- randomForest(mental_health ~., data = train_set_bal)
+rf_model_bal <- randomForest(mental_health ~., data = train_set_bal, mtry = 6)
 
 #Remove factor ordering for test set
 test_set_bal <- test_set
@@ -471,6 +472,13 @@ kable(data.frame(Models = c("Default", "Balanced"),
                                                forest_cm_bal$byClass[11]), 5)),
       caption = "Random Forest",
       format = "simple")
+```
+
+Additional Look Into Random Forest <br/>
+It was expected that Random Forest would outperform Decision Tree but the results from the separate training set shows Random Forest struggled at predicting new data. When looking at the confusion matrix from the second Random Forest model it shows that it was successful at building a classifier when trained on balanced data. It had a high F1-score with a close recall and precision measurement showing the classifier was making even false positives and false negative errors. Only when given the new and unbalanced test set, that all the models were compared with, did it have issues.
+```{r}
+confusionMatrix(rf_model_bal$confusion[-3, -3], positive = "Yes")
+confusionMatrix(rf_model_bal$confusion[-3, -3], positive = "Yes")$byClass[7]
 ```
 
 Naive Bayes - Default <br/>
@@ -549,7 +557,7 @@ For additional exploration, stepwise regression using both backwards and forewar
 full <- glm(mental_health ~ ., data = BRFSS, family = "binomial")
 null <- glm(mental_health ~ 1, data = BRFSS, family = "binomial")
 stepwise <- stepAIC(null, scope = list(lower = null, upper = full),
-                direction = "both")
+                direction = "both", trace = FALSE)
 stepwise$formula
 
 #Running Logistic Regression using the formula chosen by stepwise selection
@@ -617,6 +625,23 @@ kable(data.frame(Models = c("Decision Tree - Balanced & k-fold",
       caption = "Model Comparisons",
       format = "simple")
 ```
+
+Comparing Variable Importance <br/>
+The common variables that showed up in the ranking of important variables were: age, bad health days in the last 30 days, general health, and sex of the respondent. Except for Random Forest, every model ranked age as the most important. 
+```{r}
+#Decision Tree
+varImp(train_tree_kf)
+
+#Random Forest
+varImpPlot(rf_model_bal)
+
+#Naive Bayes
+varImp(train_NB_kf)
+
+#Logistic Regression
+varImp(train_log_kf)
+```
+
 
 ```{r}
 model_names <- c("Tree", "Forest", "NB", "Log")
